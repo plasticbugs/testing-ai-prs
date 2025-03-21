@@ -53,17 +53,21 @@ async function callAnthropicAPI(prompt) {
 }
 
 // Function to interact with the MCP server
-async function callMcpMethod(mcpProcess, method, params) {
+async function callMcpMethod(mcpProcess, toolName, arguments) {
   return new Promise((resolve, reject) => {
     const requestId = Math.floor(Math.random() * 10000);
+    
     const request = {
       jsonrpc: "2.0",
       id: requestId,
-      method,
-      params
+      method: "call_tool",  // This is the correct method for MCP
+      params: {
+        name: toolName,  // Name of the tool to call
+        arguments: arguments  // Arguments for the tool
+      }
     };
     
-    console.log(`Calling MCP method ${method}:`, JSON.stringify(params, null, 2));
+    console.log(`Calling MCP tool ${toolName}:`, JSON.stringify(arguments, null, 2));
     mcpProcess.stdin.write(JSON.stringify(request) + '\n');
     
     // Set up readline interface to read from MCP process stdout
@@ -83,7 +87,16 @@ async function callMcpMethod(mcpProcess, method, params) {
           if (response.error) {
             reject(new Error(`MCP error: ${JSON.stringify(response.error)}`));
           } else {
-            resolve(response.result);
+            // Parse the text content from the response
+            const resultText = response.result?.content?.[0]?.text;
+            try {
+              // Try to parse the JSON result
+              const parsedResult = resultText ? JSON.parse(resultText) : response.result;
+              resolve(parsedResult);
+            } catch (err) {
+              // If not valid JSON, return the text directly
+              resolve(resultText || response.result);
+            }
           }
         }
       } catch (err) {
@@ -96,7 +109,7 @@ async function callMcpMethod(mcpProcess, method, params) {
     // Set a timeout for the response
     const timeout = setTimeout(() => {
       rl.close();
-      reject(new Error(`Timeout waiting for response to method ${method}`));
+      reject(new Error(`Timeout waiting for response to tool ${toolName}`));
     }, 30000);
     
     // Clean up on response
@@ -116,14 +129,8 @@ async function implementWithPrompt() {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN,
-        DEBUG: 'mcp:*'  // Add debug flag to see more detailed logs
+        GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN
       }
-    });
-    
-    // Log everything from stdout for debugging
-    mcpProcess.stdout.on('data', (data) => {
-      console.log(`MCP stdout: ${data.toString()}`);
     });
     
     mcpProcess.stderr.on('data', (data) => {
@@ -133,60 +140,21 @@ async function implementWithPrompt() {
     // Wait for MCP server to start
     await new Promise(resolve => setTimeout(resolve, 2000));
     
-    // Try various method discovery approaches
-    console.log('Attempting to discover available methods...');
-    
-    // Try method 1: rpc.discover
-    mcpProcess.stdin.write(JSON.stringify({
+    // First, list available tools
+    const toolsRequest = {
       jsonrpc: "2.0",
-      id: 1001,
-      method: "rpc.discover",
+      id: Math.floor(Math.random() * 10000),
+      method: "list_tools",
       params: {}
-    }) + '\n');
+    };
     
-    // Try method 2: system.listMethods (from JSON-RPC spec)
-    mcpProcess.stdin.write(JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1002,
-      method: "system.listMethods",
-      params: []
-    }) + '\n');
+    console.log('Listing available tools from MCP server');
+    mcpProcess.stdin.write(JSON.stringify(toolsRequest) + '\n');
     
-    // Try method 3: introspect
-    mcpProcess.stdin.write(JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1003,
-      method: "introspect",
-      params: {}
-    }) + '\n');
+    // Wait a bit to see tools in logs
+    await new Promise(resolve => setTimeout(resolve, 1000));
     
-    // Try method 4: help
-    mcpProcess.stdin.write(JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1004,
-      method: "help",
-      params: {}
-    }) + '\n');
-    
-    // Wait for responses to be logged
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Try a simple GitHub API call to test connectivity
-    mcpProcess.stdin.write(JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1005,
-      method: "get_file_contents",
-      params: {
-        owner: "github",
-        repo: "docs",
-        path: "README.md"
-      }
-    }) + '\n');
-    
-    // Wait for response
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Construct a prompt for the AI
+    // Continue with the main implementation
     const prompt = `
 You are an AI tasked with creating a README.md file for a GitHub repository based on a Pull Request description.
 
