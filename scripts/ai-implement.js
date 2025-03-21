@@ -121,6 +121,11 @@ async function implementWithPrompt() {
       }
     });
     
+    // Log everything from stdout for debugging
+    mcpProcess.stdout.on('data', (data) => {
+      console.log(`MCP stdout: ${data.toString()}`);
+    });
+    
     mcpProcess.stderr.on('data', (data) => {
       console.error(`MCP stderr: ${data.toString()}`);
     });
@@ -128,19 +133,58 @@ async function implementWithPrompt() {
     // Wait for MCP server to start
     await new Promise(resolve => setTimeout(resolve, 2000));
     
-    // First, try to discover the available methods
-    const methodsRequest = {
+    // Try various method discovery approaches
+    console.log('Attempting to discover available methods...');
+    
+    // Try method 1: rpc.discover
+    mcpProcess.stdin.write(JSON.stringify({
       jsonrpc: "2.0",
-      id: Math.floor(Math.random() * 10000),
-      method: "github/methods",
+      id: 1001,
+      method: "rpc.discover",
       params: {}
-    };
+    }) + '\n');
     
-    console.log('Sending GitHub methods discovery request to MCP server');
-    mcpProcess.stdin.write(JSON.stringify(methodsRequest) + '\n');
+    // Try method 2: system.listMethods (from JSON-RPC spec)
+    mcpProcess.stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1002,
+      method: "system.listMethods",
+      params: []
+    }) + '\n');
     
-    // Wait a bit for discovery response in logs
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Try method 3: introspect
+    mcpProcess.stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1003,
+      method: "introspect",
+      params: {}
+    }) + '\n');
+    
+    // Try method 4: help
+    mcpProcess.stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1004,
+      method: "help",
+      params: {}
+    }) + '\n');
+    
+    // Wait for responses to be logged
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Try a simple GitHub API call to test connectivity
+    mcpProcess.stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1005,
+      method: "get_file_contents",
+      params: {
+        owner: "github",
+        repo: "docs",
+        path: "README.md"
+      }
+    }) + '\n');
+    
+    // Wait for response
+    await new Promise(resolve => setTimeout(resolve, 2000));
     
     // Construct a prompt for the AI
     const prompt = `
@@ -174,7 +218,7 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     let readmeExists = false;
     let existingSha = null;
     try {
-      const result = await callMcpMethod(mcpProcess, "getFileContents", {
+      const result = await callMcpMethod(mcpProcess, "get_file_contents", {
         owner: REPO_OWNER,
         repo: REPO_NAME,
         path: "README.md",
@@ -193,7 +237,7 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     // Create or update the README.md file
     const commitMessage = `${readmeExists ? 'Update' : 'Create'} README.md based on PR #${PR_NUMBER}`;
     
-    const updateResult = await callMcpMethod(mcpProcess, "createOrUpdateFile", {
+    const updateResult = await callMcpMethod(mcpProcess, "create_or_update_file", {
       owner: REPO_OWNER,
       repo: REPO_NAME,
       path: "README.md",
@@ -206,7 +250,7 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     console.log('File creation/update result:', updateResult);
     
     // Add a comment to the PR
-    await callMcpMethod(mcpProcess, "addIssueComment", {
+    await callMcpMethod(mcpProcess, "add_issue_comment", {
       owner: REPO_OWNER,
       repo: REPO_NAME,
       issue_number: parseInt(PR_NUMBER),
@@ -236,6 +280,29 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     if (mcpProcess) {
       mcpProcess.kill();
     }
+  }
+}
+
+async function debugMcpServer() {
+  let mcpProcess = null;
+  
+  try {
+    console.log('Starting MCP server for debugging...');
+    mcpProcess = spawn('npx', ['-y', '@modelcontextprotocol/server-github'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN,
+        DEBUG: 'mcp:*'
+      }
+    });
+    
+    mcpProcess.stdout.on('data', (data) => {
+      console.log(`MCP stdout: ${data.toString()}`);
+    });
+  } catch (error) {
+    console.error('Error starting MCP server for debugging:', error);
+    throw error;
   }
 }
 
