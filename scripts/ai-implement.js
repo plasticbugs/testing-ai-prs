@@ -116,7 +116,8 @@ async function implementWithPrompt() {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN
+        GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN,
+        DEBUG: 'mcp:*'  // Add debug flag to see more detailed logs
       }
     });
     
@@ -126,6 +127,20 @@ async function implementWithPrompt() {
     
     // Wait for MCP server to start
     await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // First, try to discover the available methods
+    const methodsRequest = {
+      jsonrpc: "2.0",
+      id: Math.floor(Math.random() * 10000),
+      method: "rpc.discover",
+      params: {}
+    };
+    
+    console.log('Sending discovery request to MCP server');
+    mcpProcess.stdin.write(JSON.stringify(methodsRequest) + '\n');
+    
+    // Wait a bit for discovery response in logs
+    await new Promise(resolve => setTimeout(resolve, 1000));
     
     // Construct a prompt for the AI
     const prompt = `
@@ -159,7 +174,7 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     let readmeExists = false;
     let existingSha = null;
     try {
-      const result = await callMcpMethod(mcpProcess, "github.getFileContents", {
+      const result = await callMcpMethod(mcpProcess, "getFileContents", {
         owner: REPO_OWNER,
         repo: REPO_NAME,
         path: "README.md",
@@ -178,7 +193,7 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     // Create or update the README.md file
     const commitMessage = `${readmeExists ? 'Update' : 'Create'} README.md based on PR #${PR_NUMBER}`;
     
-    const updateResult = await callMcpMethod(mcpProcess, "github.createOrUpdateFile", {
+    const updateResult = await callMcpMethod(mcpProcess, "createOrUpdateFile", {
       owner: REPO_OWNER,
       repo: REPO_NAME,
       path: "README.md",
@@ -191,7 +206,7 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     console.log('File creation/update result:', updateResult);
     
     // Add a comment to the PR
-    await callMcpMethod(mcpProcess, "github.addIssueComment", {
+    await callMcpMethod(mcpProcess, "addIssueComment", {
       owner: REPO_OWNER,
       repo: REPO_NAME,
       issue_number: parseInt(PR_NUMBER),
