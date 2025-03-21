@@ -60,7 +60,7 @@ async function callMcpMethod(mcpProcess, toolName, arguments) {
     const request = {
       jsonrpc: "2.0",
       id: requestId,
-      method: "mcp.call_tool",  // Change to match the exact method name
+      method: "call_tool",
       params: {
         name: toolName,
         arguments: arguments
@@ -79,23 +79,32 @@ async function callMcpMethod(mcpProcess, toolName, arguments) {
     // Handler for MCP responses
     const onLine = (line) => {
       try {
+        // Debug every line received
+        console.log('Raw MCP response line:', line);
+        
         const response = JSON.parse(line);
         console.log('MCP response:', JSON.stringify(response, null, 2));
         
         if (response.id === requestId) {
           rl.close();
           if (response.error) {
+            console.error('MCP error details:', response.error);
             reject(new Error(`MCP error: ${JSON.stringify(response.error)}`));
           } else {
-            // Parse the text content from the response
-            const resultText = response.result?.content?.[0]?.text;
-            try {
-              // Try to parse the JSON result
-              const parsedResult = resultText ? JSON.parse(resultText) : response.result;
-              resolve(parsedResult);
-            } catch (err) {
-              // If not valid JSON, return the text directly
-              resolve(resultText || response.result);
+            // Handle the response structure more carefully
+            if (response.result?.content?.[0]?.text) {
+              const resultText = response.result.content[0].text;
+              try {
+                // Try to parse the JSON result
+                const parsedResult = JSON.parse(resultText);
+                resolve(parsedResult);
+              } catch (err) {
+                // If not valid JSON, return the text directly
+                resolve(resultText);
+              }
+            } else {
+              // Return the raw result if it doesn't match expected structure
+              resolve(response.result);
             }
           }
         }
@@ -123,27 +132,31 @@ async function implementWithPrompt() {
   let mcpProcess = null;
   
   try {
-    // Start the MCP server
+    // Start the MCP server with additional debugging
     console.log('Starting MCP server...');
     mcpProcess = spawn('npx', ['-y', '@modelcontextprotocol/server-github'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN
+        GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN,
+        DEBUG: 'mcp:*'  // Enable debug mode
       }
     });
     
+    // Monitor both stdout and stderr for debugging
     mcpProcess.stderr.on('data', (data) => {
       console.error(`MCP stderr: ${data.toString()}`);
     });
     
-    // Wait for MCP server to start
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Wait longer for MCP server to fully initialize
+    console.log('Waiting for MCP server to initialize...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
     
-    // First, list available tools
+    // First, list available tools to check what's actually available
+    const toolsRequestId = Math.floor(Math.random() * 10000);
     const toolsRequest = {
       jsonrpc: "2.0",
-      id: Math.floor(Math.random() * 10000),
+      id: toolsRequestId,
       method: "list_tools",
       params: {}
     };
@@ -151,8 +164,40 @@ async function implementWithPrompt() {
     console.log('Listing available tools from MCP server');
     mcpProcess.stdin.write(JSON.stringify(toolsRequest) + '\n');
     
-    // Wait a bit to see tools in logs
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Set up a separate readline for the tools listing
+    const toolsRL = readline.createInterface({
+      input: mcpProcess.stdout,
+      terminal: false
+    });
+    
+    let availableTools = [];
+    
+    // Collect available tools before proceeding
+    await new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        console.log('Tools listing timeout, continuing anyway');
+        toolsRL.close();
+        resolve();
+      }, 5000);
+      
+      toolsRL.on('line', (line) => {
+        try {
+          console.log('Raw tools response:', line);
+          const response = JSON.parse(line);
+          if (response.id === toolsRequestId) {
+            if (response.result?.tools) {
+              availableTools = response.result.tools;
+              console.log('Available tools:', JSON.stringify(availableTools, null, 2));
+            }
+            clearTimeout(timeout);
+            toolsRL.close();
+            resolve();
+          }
+        } catch (err) {
+          console.error('Error parsing tools response:', err);
+        }
+      });
+    });
     
     // Continue with the main implementation
     const prompt = `
@@ -182,10 +227,11 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     const readmeContent = aiResponse.content[0].text.trim();
     console.log('Generated README content:', readmeContent);
     
-    // Check if README.md exists
+    // Check if README.md exists - with better error handling
     let readmeExists = false;
     let existingSha = null;
     try {
+      console.log('Checking if README.md exists...');
       const result = await callMcpMethod(mcpProcess, "get_file_contents", {
         owner: REPO_OWNER,
         repo: REPO_NAME,
@@ -193,54 +239,128 @@ Respond with ONLY the content that should go in the README.md file, nothing else
         branch: BRANCH_NAME
       });
       
+      console.log('File check result:', result);
+      
       if (result && result.sha) {
         readmeExists = true;
         existingSha = result.sha;
         console.log('Existing README.md found with SHA:', existingSha);
       }
     } catch (error) {
-      console.log('README.md does not exist yet, will create it');
+      console.log('README.md does not exist yet or error occurred:', error.message);
     }
     
-    // Create or update the README.md file
+    // Create or update the README.md file - with better error handling
+    console.log(`Will ${readmeExists ? 'update' : 'create'} README.md`);
     const commitMessage = `${readmeExists ? 'Update' : 'Create'} README.md based on PR #${PR_NUMBER}`;
     
-    const updateResult = await callMcpMethod(mcpProcess, "create_or_update_file", {
-      owner: REPO_OWNER,
-      repo: REPO_NAME,
-      path: "README.md",
-      message: commitMessage,
-      content: Buffer.from(readmeContent).toString('base64'),
-      branch: BRANCH_NAME,
-      ...(readmeExists ? { sha: existingSha } : {})
-    });
-    
-    console.log('File creation/update result:', updateResult);
-    
-    // Add a comment to the PR
-    await callMcpMethod(mcpProcess, "add_issue_comment", {
-      owner: REPO_OWNER,
-      repo: REPO_NAME,
-      issue_number: parseInt(PR_NUMBER),
-      body: `✅ I've ${readmeExists ? 'updated' : 'created'} the README.md based on the PR description. Please review the changes!`
-    });
-    
-    // Mark the PR as ready for review using GitHub CLI
-    await exec(`gh pr ready ${PR_NUMBER}`, {
-      env: {
-        ...process.env,
-        GITHUB_TOKEN: GITHUB_TOKEN
+    try {
+      const updateResult = await callMcpMethod(mcpProcess, "create_or_update_file", {
+        owner: REPO_OWNER,
+        repo: REPO_NAME,
+        path: "README.md",
+        message: commitMessage,
+        content: Buffer.from(readmeContent).toString('base64'),
+        branch: BRANCH_NAME,
+        ...(readmeExists ? { sha: existingSha } : {})
+      });
+      
+      console.log('File creation/update result:', updateResult);
+      
+      // Add a comment to the PR
+      try {
+        await callMcpMethod(mcpProcess, "add_issue_comment", {
+          owner: REPO_OWNER,
+          repo: REPO_NAME,
+          issue_number: parseInt(PR_NUMBER),
+          body: `✅ I've ${readmeExists ? 'updated' : 'created'} the README.md based on the PR description. Please review the changes!`
+        });
+      } catch (commentError) {
+        console.error('Error adding comment to PR:', commentError);
+        console.log('Continuing despite comment error...');
       }
-    });
-    
-    return {
-      status: 'success',
-      message: `${readmeExists ? 'Updated' : 'Created'} README.md successfully`,
-      fileChanges: [{
-        name: 'create_or_update_file',
-        path: 'README.md'
-      }]
-    };
+      
+      // Mark the PR as ready for review using GitHub CLI
+      try {
+        await exec(`gh pr ready ${PR_NUMBER}`, {
+          env: {
+            ...process.env,
+            GITHUB_TOKEN: GITHUB_TOKEN
+          }
+        });
+      } catch (prReadyError) {
+        console.error('Error marking PR as ready:', prReadyError);
+        console.log('Continuing despite PR ready error...');
+      }
+      
+      return {
+        status: 'success',
+        message: `${readmeExists ? 'Updated' : 'Created'} README.md successfully`,
+        fileChanges: [{
+          name: 'create_or_update_file',
+          path: 'README.md'
+        }]
+      };
+    } catch (error) {
+      console.error('Error in file operation:', error);
+      
+      // Fallback to GitHub CLI if MCP tools fail
+      console.log('Attempting fallback using GitHub CLI...');
+      try {
+        // Sanitize multiline content for shell
+        const sanitizedContent = readmeContent.replace(/'/g, "'\\''");
+        
+        // Use GitHub CLI as a fallback
+        const tempFile = `/tmp/readme-${Date.now()}.md`;
+        fs.writeFileSync(tempFile, readmeContent);
+        
+        await exec(`
+          cat ${tempFile} | 
+          gh api --method PUT repos/${REPO_OWNER}/${REPO_NAME}/contents/README.md \
+          -f message='${commitMessage}' \
+          -f content="$(base64 -w0 ${tempFile})" \
+          -f branch=${BRANCH_NAME} ${readmeExists ? `-f sha=${existingSha}` : ''}
+        `, {
+          env: {
+            ...process.env,
+            GITHUB_TOKEN: GITHUB_TOKEN
+          }
+        });
+        
+        console.log('File created/updated using GitHub CLI fallback');
+        
+        // Clean up temp file
+        fs.unlinkSync(tempFile);
+        
+        // Add a comment using GitHub CLI
+        await exec(`gh pr comment ${PR_NUMBER} --body "✅ I've ${readmeExists ? 'updated' : 'created'} the README.md based on the PR description. Please review the changes!"`, {
+          env: {
+            ...process.env,
+            GITHUB_TOKEN: GITHUB_TOKEN
+          }
+        });
+        
+        // Mark the PR as ready for review using GitHub CLI
+        await exec(`gh pr ready ${PR_NUMBER}`, {
+          env: {
+            ...process.env,
+            GITHUB_TOKEN: GITHUB_TOKEN
+          }
+        });
+        
+        return {
+          status: 'success',
+          message: `${readmeExists ? 'Updated' : 'Created'} README.md successfully (via fallback)`,
+          fileChanges: [{
+            name: 'create_or_update_file',
+            path: 'README.md'
+          }]
+        };
+      } catch (fallbackError) {
+        console.error('Fallback also failed:', fallbackError);
+        throw error; // Throw the original error
+      }
+    }
   } catch (error) {
     console.error('Error in implementation:', error);
     throw error;
