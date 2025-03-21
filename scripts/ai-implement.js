@@ -52,7 +52,7 @@ const callAI = async (prompt, mcpProcessStdin, mcpProcessStdout) => {
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': AI_API_KEY,
-          'anthropic-beta': 'tools-2023-12-15'
+          'anthropic-beta': '2023-06-01'
         }
       }
     );
