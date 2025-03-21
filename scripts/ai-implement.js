@@ -44,7 +44,12 @@ const callAI = async (prompt, mcpProcessStdin, mcpProcessStdout) => {
         tools: [
           {
             name: "mcp",
-            description: "Model Context Protocol tool for GitHub operations"
+            description: "Model Context Protocol tool for GitHub operations",
+            input_schema: {
+              type: "object",
+              properties: {},
+              required: []
+            }
           }
         ]
       },
