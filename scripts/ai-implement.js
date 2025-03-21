@@ -60,7 +60,7 @@ async function callMcpMethod(mcpProcess, toolName, arguments) {
     const request = {
       jsonrpc: "2.0",
       id: requestId,
-      method: "call_tool",
+      method: toolName,
       params: {
         name: toolName,
         arguments: arguments
