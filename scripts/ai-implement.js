@@ -16,63 +16,51 @@ const {
   GITHUB_TOKEN
 } = process.env;
 
+// Validate required environment variables
 if (!PR_BODY || !REPO_OWNER || !REPO_NAME || !PR_NUMBER || !BRANCH_NAME || !AI_API_KEY || !GITHUB_TOKEN) {
   console.error('Missing required environment variables');
-  console.error({
-    PR_BODY: !!PR_BODY,
-    REPO_OWNER: !!REPO_OWNER,
-    REPO_NAME: !!REPO_NAME,
-    PR_NUMBER: !!PR_NUMBER,
-    BRANCH_NAME: !!BRANCH_NAME,
-    AI_API_KEY: !!AI_API_KEY,
-    GITHUB_TOKEN: !!GITHUB_TOKEN
-  });
   process.exit(1);
 }
 
-// Function to call the AI API
-const callAI = async (prompt, mcpProcessStdin, mcpProcessStdout) => {
-  try {
-    console.log('Calling Anthropic API...');
-    
-    const response = await axios.post(
-      'https://api.anthropic.com/v1/messages',
-      {
-        model: "claude-3-7-sonnet-20250219",
-        max_tokens: 4000,
-        messages: [{ role: "user", content: prompt }],
-        tools: [
-          {
-            name: "mcp",
-            description: "Model Context Protocol tool for GitHub operations",
-            input_schema: {
-              type: "object",
-              properties: {},
-              required: []
-            }
-          }
-        ]
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': AI_API_KEY,
-          'anthropic-version': '2023-06-01'
-        }
-      }
-    );
-    
-    console.log('Received response from API');
-    return response.data;
-  } catch (error) {
-    console.error('Error calling AI:', error.response?.data || error.message);
-    throw error;
-  }
-};
-
-// Function to run the MCP server and communicate with it
-async function runWithMCP(prompt) {
+// Function to process MCP tool use
+async function processMcpToolUse(toolUse, mcpProcess) {
   return new Promise((resolve, reject) => {
+    console.log(`Processing MCP tool use: ${JSON.stringify(toolUse)}`);
+    
+    // Send the tool input to the MCP server
+    const inputJson = JSON.stringify(toolUse.input) + '\n';
+    mcpProcess.stdin.write(inputJson);
+    
+    // Set up a collector for the output
+    let outputData = '';
+    let dataHandler = (data) => {
+      const dataStr = data.toString();
+      outputData += dataStr;
+      
+      // Check if we got a complete JSON response
+      try {
+        JSON.parse(outputData);
+        // If we got here, we have a complete JSON response
+        mcpProcess.stdout.removeListener('data', dataHandler);
+        resolve(outputData);
+      } catch (e) {
+        // Not complete JSON yet, keep collecting
+      }
+    };
+    
+    mcpProcess.stdout.on('data', dataHandler);
+    
+    // Handle errors
+    mcpProcess.stderr.once('data', (data) => {
+      console.error(`MCP error for tool use: ${data}`);
+      reject(new Error(`MCP error: ${data}`));
+    });
+  });
+}
+
+// Function to call the AI API and handle tool use
+async function runWithAI(initialPrompt) {
+  return new Promise(async (resolve, reject) => {
     console.log('Starting MCP server...');
     
     // Start the MCP server
@@ -84,79 +72,123 @@ async function runWithMCP(prompt) {
       }
     });
     
-    let mcpOutput = '';
-    let mcpError = '';
-    
-    mcpProcess.stdout.on('data', (data) => {
-      mcpOutput += data.toString();
-      console.log(`MCP stdout: ${data}`);
-    });
-    
     mcpProcess.stderr.on('data', (data) => {
-      mcpError += data.toString();
       console.error(`MCP stderr: ${data}`);
     });
     
-    mcpProcess.on('error', (error) => {
-      console.error('Failed to start MCP process:', error);
-      reject(error);
-    });
+    // Wait for MCP server to start
+    await new Promise(resolve => setTimeout(resolve, 2000));
     
-    // Give the MCP server a moment to start up
-    setTimeout(async () => {
-      try {
-        // Prepare the prompt with context about the repository and PR
-        const fullPrompt = `
-You are tasked with implementing the changes described in this PR description:
-
-${PR_BODY}
-
-Repository: ${REPO_OWNER}/${REPO_NAME}
-Branch: ${BRANCH_NAME}
-PR Number: ${PR_NUMBER}
-
-Use the GitHub MCP tools to:
-1. Understand the repository structure
-2. Make necessary code changes
-3. Commit those changes to the branch
-
-Tools available through MCP:
-- get_file_contents: To examine existing files
-- create_or_update_file: To modify individual files
-- push_files: To commit multiple files at once
-- list_pull_requests, get_pull_request: To get information about the PR
-- get_pull_request_files: To see what files have been changed already
-
-Implement the requested changes by making commits to the branch. Make sure all changes are properly tested.
-`;
-
-        // Call the AI API and pass the MCP stdin/stdout
-        const aiResponse = await callAI(fullPrompt, mcpProcess.stdin, mcpProcess.stdout);
-        console.log('AI Response:', JSON.stringify(aiResponse, null, 2));
+    try {
+      // Initial prompt to Claude
+      let messages = [{ role: "user", content: initialPrompt }];
+      let allFileChanges = [];
+      
+      // Continue conversation with Claude until it's done
+      while (true) {
+        console.log('Calling Anthropic API...');
         
-        // Add a comment to the PR with a summary of changes
-        try {
-          await exec(`gh pr comment ${PR_NUMBER} --body "✅ AI implementation completed. Please review the changes."`, {
-            env: {
-              ...process.env,
-              GITHUB_TOKEN: GITHUB_TOKEN
+        // Call Claude API
+        const response = await axios.post(
+          'https://api.anthropic.com/v1/messages',
+          {
+            model: "claude-3-7-sonnet-20250219",
+            max_tokens: 4000,
+            messages: messages,
+            tools: [
+              {
+                type: "function",
+                function: {
+                  name: "mcp",
+                  description: "Model Context Protocol tool for GitHub operations",
+                  parameters: {
+                    type: "object",
+                    properties: {},
+                    required: []
+                  }
+                }
+              }
+            ]
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': AI_API_KEY,
+              'anthropic-version': '2023-06-01'
             }
+          }
+        );
+        
+        console.log('Received response from API');
+        
+        const aiResponse = response.data;
+        console.log(`AI Response: ${JSON.stringify(aiResponse, null, 2)}`);
+        
+        // Check if Claude wants to use a tool
+        if (aiResponse.stop_reason === "tool_use") {
+          // Find the tool use request
+          const toolUse = aiResponse.content.find(item => item.type === "tool_use");
+          
+          if (toolUse && toolUse.name === "mcp") {
+            // Process the tool use with MCP
+            const toolResponse = await processMcpToolUse(toolUse, mcpProcess);
+            
+            // Add the tool response to the conversation
+            messages.push({
+              role: "assistant",
+              content: [
+                ...aiResponse.content
+              ]
+            });
+            
+            messages.push({
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: toolUse.id,
+                  content: toolResponse
+                }
+              ]
+            });
+            
+            // Track file changes
+            try {
+              const parsedResponse = JSON.parse(toolResponse);
+              if (parsedResponse.name === "create_or_update_file" || 
+                  parsedResponse.name === "push_files") {
+                allFileChanges.push(parsedResponse);
+              }
+            } catch (e) {
+              console.error('Error parsing tool response:', e);
+            }
+          } else {
+            console.error('Unknown tool use request:', toolUse);
+            break;
+          }
+        } else {
+          // Claude is done, add final response and exit loop
+          messages.push({
+            role: "assistant",
+            content: aiResponse.content
           });
-          console.log('Added comment to PR');
-        } catch (error) {
-          console.error('Error adding comment to PR:', error);
+          break;
         }
-        
-        // Terminate the MCP process
-        mcpProcess.kill();
-        
-        resolve({ status: 'success', message: 'Implementation completed successfully' });
-      } catch (error) {
-        console.error('Error in AI implementation:', error);
-        mcpProcess.kill();
-        reject(error);
       }
-    }, 2000);
+      
+      // Terminate the MCP process
+      mcpProcess.kill();
+      
+      resolve({ 
+        status: 'success', 
+        message: 'Implementation completed successfully',
+        fileChanges: allFileChanges
+      });
+    } catch (error) {
+      console.error('Error in AI communication:', error);
+      mcpProcess.kill();
+      reject(error);
+    }
   });
 }
 
@@ -166,43 +198,77 @@ async function main() {
     console.log(`Repository: ${REPO_OWNER}/${REPO_NAME}`);
     console.log(`PR: #${PR_NUMBER}, Branch: ${BRANCH_NAME}`);
     
-    // Call the AI service through MCP
-    const result = await runWithMCP(PR_BODY);
+    // Prepare the prompt with context about the repository and PR
+    const fullPrompt = `
+You are tasked with implementing the changes described in this PR description:
+
+${PR_BODY}
+
+Repository: ${REPO_OWNER}/${REPO_NAME}
+Branch: ${BRANCH_NAME}
+PR Number: ${PR_NUMBER}
+
+Use the GitHub MCP tools to:
+1. Understand the repository structure first by getting file contents
+2. Make necessary code changes based on the PR description
+3. Commit those changes to the branch
+
+Available MCP tools include:
+- get_file_contents: To examine existing files
+- create_or_update_file: To modify individual files
+- push_files: To commit multiple files at once
+- list_pull_requests, get_pull_request: To get information about the PR
+- get_pull_request_files: To see what files have been changed already
+
+Please implement the requested changes by making commits to the branch. Be thorough and complete the implementation.
+`;
     
-    // Set output for the GitHub Action (using newer syntax)
+    // Call the AI service through MCP
+    const result = await runWithAI(fullPrompt);
+    
+    // Add a comment to the PR with a summary of changes
+    let comment = "✅ AI implementation completed. The following changes were made:\n\n";
+    
+    if (result.fileChanges && result.fileChanges.length > 0) {
+      result.fileChanges.forEach(change => {
+        if (change.name === "create_or_update_file") {
+          comment += `- Updated file: ${change.path}\n`;
+        } else if (change.name === "push_files") {
+          comment += `- Pushed multiple files in a single commit\n`;
+          change.files.forEach(file => {
+            comment += `  - ${file.path}\n`;
+          });
+        }
+      });
+    } else {
+      comment += "No file changes were detected. Please check the implementation.";
+    }
+    
+    await exec(`gh pr comment ${PR_NUMBER} --body "${comment}"`, {
+      env: {
+        ...process.env,
+        GITHUB_TOKEN: GITHUB_TOKEN
+      }
+    });
+    console.log('Added comment to PR');
+    
+    // Set output for the GitHub Action
     const outputPath = process.env.GITHUB_OUTPUT;
     if (outputPath) {
       fs.appendFileSync(outputPath, `status=${result.status}\n`);
       fs.appendFileSync(outputPath, `message=${result.message}\n`);
-    } else {
-      // Fallback for older GitHub Actions
-      console.log(`::set-output name=status::${result.status}`);
-      console.log(`::set-output name=message::${result.message}`);
     }
     
     console.log('PR implementation completed with status:', result.status);
     
-    if (result.status === 'success') {
+    if (result.status === 'success' && result.fileChanges && result.fileChanges.length > 0) {
       process.exit(0);
     } else {
+      console.log('No file changes were made. Exiting with error code.');
       process.exit(1);
     }
   } catch (error) {
     console.error('Error in main process:', error);
-    
-    // Try to add a comment to the PR about the failure
-    try {
-      const errorMessage = error.message || 'Unknown error';
-      await exec(`gh pr comment ${PR_NUMBER} --body "❌ AI implementation failed: ${errorMessage}"`, {
-        env: {
-          ...process.env,
-          GITHUB_TOKEN: GITHUB_TOKEN
-        }
-      });
-    } catch (commentError) {
-      console.error('Failed to add error comment to PR:', commentError);
-    }
-    
     process.exit(1);
   }
 }
