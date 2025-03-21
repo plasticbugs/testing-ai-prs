@@ -132,11 +132,11 @@ async function implementWithPrompt() {
     const methodsRequest = {
       jsonrpc: "2.0",
       id: Math.floor(Math.random() * 10000),
-      method: "rpc.discover",
+      method: "github/methods",
       params: {}
     };
     
-    console.log('Sending discovery request to MCP server');
+    console.log('Sending GitHub methods discovery request to MCP server');
     mcpProcess.stdin.write(JSON.stringify(methodsRequest) + '\n');
     
     // Wait a bit for discovery response in logs
