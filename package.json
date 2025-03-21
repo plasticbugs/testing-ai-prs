@@ -1,0 +1,9 @@
+{
+  "name": "ai-pr-implementation",
+  "version": "1.0.0",
+  "description": "AI-driven PR implementation",
+  "dependencies": {
+    "@modelcontextprotocol/server-github": "latest",
+    "axios": "^1.6.0"
+  }
+}

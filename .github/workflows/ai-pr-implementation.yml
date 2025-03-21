@@ -12,12 +12,17 @@ jobs:
       (github.event.pull_request.draft == true) || 
       contains(github.event.pull_request.labels.*.name, 'ai-implement')
     runs-on: ubuntu-latest
+    # Add these permissions for GitHub token
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
@@ -25,31 +30,29 @@ jobs:
           node-version: '18'
 
       - name: Install dependencies
-        run: npm install @modelcontextprotocol/server-github
+        run: |
+          npm install axios @modelcontextprotocol/server-github
+          npm install -g @github/cli
+
+      - name: Authenticate GitHub CLI
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
 
       - name: Process PR with AI
         id: ai_implementation
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # For batch API access to your AI provider
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           PR_BODY: ${{ github.event.pull_request.body }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
-        run: |
-          # This script would:
-          # 1. Extract requirements from PR_BODY
-          # 2. Call AI batch API with MCP capabilities
-          # 3. Let the AI make commits via MCP
-          node ./scripts/ai-implement.js
+        run: node ./scripts/ai-implement.js
 
       - name: Mark PR as ready for review
         if: steps.ai_implementation.outputs.status == 'success'
         run: |
-          gh pr ready $PR_NUMBER
-          gh pr comment $PR_NUMBER --body "✅ AI implementation complete. This PR is now ready for review."
+          gh pr ready ${{ github.event.pull_request.number }}
+          gh pr comment ${{ github.event.pull_request.number }} --body "✅ AI implementation complete. This PR is now ready for review."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
