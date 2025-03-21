@@ -60,10 +60,10 @@ async function callMcpMethod(mcpProcess, toolName, arguments) {
     const request = {
       jsonrpc: "2.0",
       id: requestId,
-      method: "call_tool",  // This is the correct method for MCP
+      method: "mcp.call_tool",  // Change to match the exact method name
       params: {
-        name: toolName,  // Name of the tool to call
-        arguments: arguments  // Arguments for the tool
+        name: toolName,
+        arguments: arguments
       }
     };
     
