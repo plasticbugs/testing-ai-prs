@@ -159,7 +159,7 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     let readmeExists = false;
     let existingSha = null;
     try {
-      const result = await callMcpMethod(mcpProcess, "get_file_contents", {
+      const result = await callMcpMethod(mcpProcess, "github.getFileContents", {
         owner: REPO_OWNER,
         repo: REPO_NAME,
         path: "README.md",
@@ -178,7 +178,7 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     // Create or update the README.md file
     const commitMessage = `${readmeExists ? 'Update' : 'Create'} README.md based on PR #${PR_NUMBER}`;
     
-    const updateResult = await callMcpMethod(mcpProcess, "create_or_update_file", {
+    const updateResult = await callMcpMethod(mcpProcess, "github.createOrUpdateFile", {
       owner: REPO_OWNER,
       repo: REPO_NAME,
       path: "README.md",
@@ -191,7 +191,7 @@ Respond with ONLY the content that should go in the README.md file, nothing else
     console.log('File creation/update result:', updateResult);
     
     // Add a comment to the PR
-    await callMcpMethod(mcpProcess, "add_issue_comment", {
+    await callMcpMethod(mcpProcess, "github.addIssueComment", {
       owner: REPO_OWNER,
       repo: REPO_NAME,
       issue_number: parseInt(PR_NUMBER),
