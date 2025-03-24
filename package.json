@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "AI-driven PR implementation",
   "dependencies": {
-    "@modelcontextprotocol/server-github": "latest",
+    "@modelcontextprotocol/server-github": "0.6.2",
     "axios": "^1.6.0"
   }
 }
