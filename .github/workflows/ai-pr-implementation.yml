@@ -12,7 +12,6 @@ jobs:
       (github.event.pull_request.draft == true) || 
       contains(github.event.pull_request.labels.*.name, 'ai-implement')
     runs-on: ubuntu-latest
-    # Add these permissions for GitHub token
     permissions:
       contents: write
       pull-requests: write
@@ -24,17 +23,15 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          node-version: '18'
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
-          npm install axios @modelcontextprotocol/server-github
-
-      - name: Authenticate GitHub CLI
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+          python -m pip install --upgrade pip
+          pip install requests anthropic
 
       - name: Process PR with AI
         id: ai_implementation
@@ -46,12 +43,230 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
-        run: node ./scripts/ai-implement.js
+        run: |
+          cat > ./process_pr.py << 'EOF'
+          import os
+          import json
+          import base64
+          import subprocess
+          import requests
+          import time
+          from anthropic import Anthropic
+
+          # Get environment variables
+          PR_BODY = os.environ.get('PR_BODY')
+          REPO_OWNER = os.environ.get('REPO_OWNER')
+          REPO_NAME = os.environ.get('REPO_NAME')
+          PR_NUMBER = os.environ.get('PR_NUMBER')
+          BRANCH_NAME = os.environ.get('BRANCH_NAME')
+          GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
+          AI_API_KEY = os.environ.get('AI_API_KEY')
+
+          # Print key information
+          print(f"Processing PR #{PR_NUMBER} for {REPO_OWNER}/{REPO_NAME} on branch {BRANCH_NAME}")
+          
+          def start_mcp_server():
+              """Start the MCP server and return the process handle"""
+              print("Starting MCP server...")
+              process = subprocess.Popen(
+                  ["npx", "-y", "@modelcontextprotocol/server-github"],
+                  stdin=subprocess.PIPE,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  env={**os.environ, "GITHUB_PERSONAL_ACCESS_TOKEN": GITHUB_TOKEN},
+                  text=True
+              )
+              
+              # Wait a moment for the server to start
+              time.sleep(2)
+              
+              # Check if process is still running
+              if process.poll() is not None:
+                  print("MCP server failed to start")
+                  print("STDERR:", process.stderr.read())
+                  return None
+                  
+              return process
+              
+          def call_mcp_method(process, method, params):
+              """Call an MCP method and return the response"""
+              request_id = int(time.time() * 1000) % 10000
+              request = {
+                  "jsonrpc": "2.0",
+                  "id": request_id,
+                  "method": method,
+                  "params": params
+              }
+              
+              print(f"Calling MCP method {method}: {json.dumps(params, indent=2)}")
+              
+              # Send the request
+              process.stdin.write(json.dumps(request) + "\n")
+              process.stdin.flush()
+              
+              # Read the response
+              for line in process.stdout:
+                  line = line.strip()
+                  if not line:
+                      continue
+                      
+                  try:
+                      response = json.loads(line)
+                      print(f"MCP response: {json.dumps(response, indent=2)}")
+                      
+                      # Check if this is the response to our request
+                      if response.get("id") == request_id:
+                          if "error" in response:
+                              print(f"MCP error: {response['error']}")
+                              return None
+                          else:
+                              return response.get("result")
+                  except json.JSONDecodeError:
+                      print(f"Failed to parse MCP response: {line}")
+                      
+              return None
+              
+          def call_anthropic_api(prompt):
+              """Call the Anthropic API to generate README content"""
+              print("Calling Anthropic API...")
+              
+              client = Anthropic(api_key=AI_API_KEY)
+              message = client.messages.create(
+                  model="claude-3-7-sonnet-20250219",
+                  max_tokens=4000,
+                  messages=[
+                      {"role": "user", "content": prompt}
+                  ]
+              )
+              
+              print("Received response from Anthropic API")
+              return message
+              
+          def main():
+              # Start the MCP server
+              mcp_process = start_mcp_server()
+              if not mcp_process:
+                  print("Failed to start MCP server")
+                  return False
+                  
+              try:
+                  # Construct prompt for AI
+                  prompt = f"""
+          You are an AI tasked with creating a README.md file for a GitHub repository based on a Pull Request description.
+
+          Repository: {REPO_OWNER}/{REPO_NAME}
+          Branch: {BRANCH_NAME}
+          PR Number: {PR_NUMBER}
+
+          PR Description:
+          {PR_BODY}
+
+          Based on this PR description, create a README.md file for this repository. 
+          Your README should be comprehensive, well-formatted with Markdown, and include all the necessary sections 
+          (description, features, installation instructions, etc.).
+
+          If the PR description mentions specific technologies, themes, or features, be sure to incorporate those.
+          For example, if it mentions a cat theme, include cat emojis and playful cat-related language.
+
+          Respond with ONLY the content that should go in the README.md file, nothing else.
+          """
+                  
+                  # Get AI-generated README content
+                  ai_response = call_anthropic_api(prompt)
+                  readme_content = ai_response.content[0].text.strip()
+                  print(f"Generated README content: {readme_content[:100]}...")
+                  
+                  # Check if README exists
+                  readme_exists = False
+                  existing_sha = None
+                  
+                  try:
+                      # Use 'github.GetContent' for MCP method name
+                      result = call_mcp_method(mcp_process, "github.GetContent", {
+                          "owner": REPO_OWNER,
+                          "repo": REPO_NAME,
+                          "path": "README.md",
+                          "ref": BRANCH_NAME
+                      })
+                      
+                      if result and "sha" in result:
+                          readme_exists = True
+                          existing_sha = result["sha"]
+                          print(f"Existing README.md found with SHA: {existing_sha}")
+                      
+                  except Exception as e:
+                      print(f"README.md does not exist yet: {str(e)}")
+                  
+                  # Create or update README.md
+                  operation_name = "UpdateFile" if readme_exists else "CreateFile"
+                  
+                  update_params = {
+                      "owner": REPO_OWNER,
+                      "repo": REPO_NAME,
+                      "path": "README.md",
+                      "message": f"{'Update' if readme_exists else 'Create'} README.md based on PR #{PR_NUMBER}",
+                      "content": base64.b64encode(readme_content.encode()).decode(),
+                      "branch": BRANCH_NAME
+                  }
+                  
+                  if readme_exists:
+                      update_params["sha"] = existing_sha
+                  
+                  result = call_mcp_method(mcp_process, f"github.{operation_name}", update_params)
+                  
+                  if not result:
+                      print("Failed to create/update README.md")
+                      return False
+                  
+                  # Add comment to PR
+                  comment_result = call_mcp_method(mcp_process, "github.CreateIssueComment", {
+                      "owner": REPO_OWNER,
+                      "repo": REPO_NAME,
+                      "issue_number": int(PR_NUMBER),
+                      "body": f"✅ I've {'updated' if readme_exists else 'created'} the README.md based on the PR description. Please review the changes!"
+                  })
+                  
+                  # Mark PR as ready for review using GitHub CLI
+                  subprocess.run(
+                      ["gh", "pr", "ready", PR_NUMBER],
+                      env={**os.environ, "GITHUB_TOKEN": GITHUB_TOKEN},
+                      check=True
+                  )
+                  
+                  # Set output for GitHub Actions
+                  with open(os.environ.get('GITHUB_OUTPUT') or '/dev/null', 'a') as f:
+                      f.write(f"status=success\n")
+                      f.write(f"message={'Updated' if readme_exists else 'Created'} README.md successfully\n")
+                  
+                  return True
+              
+              except Exception as e:
+                  print(f"Error in implementation: {e}")
+                  
+                  # Set failure output
+                  with open(os.environ.get('GITHUB_OUTPUT') or '/dev/null', 'a') as f:
+                      f.write("status=failure\n")
+                      f.write(f"message=Error: {str(e)}\n")
+                  
+                  return False
+              
+              finally:
+                  # Clean up MCP process
+                  if mcp_process:
+                      mcp_process.terminate()
+
+          # Run the main function
+          success = main()
+          exit(0 if success else 1)
+          EOF
+
+          python ./process_pr.py
 
       - name: Mark PR as ready for review
         if: steps.ai_implementation.outputs.status == 'success'
         run: |
-          gh pr ready ${{ github.event.pull_request.number }}
-          gh pr comment ${{ github.event.pull_request.number }} --body "✅ AI implementation complete. This PR is now ready for review."
+          gh pr ready $PR_NUMBER
+          gh pr comment $PR_NUMBER --body "✅ AI implementation complete. This PR is now ready for review."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
